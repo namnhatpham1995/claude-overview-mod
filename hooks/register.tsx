@@ -57,6 +57,8 @@ const CHILDREN_MAX = 20
 // The tools a controller starts or briefs another session with; their input or result names it.
 const BRIEF_TOOL = /^(mcp__ccd_session__start_session|SendMessage|mcp__ccd_session_mgmt__send_message|mcp__ccd_session_mgmt__clear_session)$/
 const HOST_ID = /local_[0-9a-f][0-9a-f-]{7,}/g
+// A background task's end, as its notification names it; a monitor's events carry no status.
+const TASK_ENDED = /<task-id>([^<]+)<\/task-id>\s*(?:<[^>]+>[^<]*<\/[^>]+>\s*)*?<status>(?:completed|failed|killed|stopped)<\/status>/g
 // A context this large is worth a /compact or a fresh session.
 const LARGE_CONTEXT = 150_000
 
@@ -1007,6 +1009,20 @@ export const register: Register = (on, options) => {
     await writeSelf($, true)
     await refreshSessions($)
     return stopped
+  }).catch(($, e, next) => next(e))
+
+  // A plugin above may continue past the stop hook, so a task also leaves the list when the
+  // notification of its end reaches the main conversation.
+  on('session.append', async ($, e, next) => {
+    const kept = await next(e)
+    if (e.agentId || e.origin.kind !== 'task-notification') return kept
+    const text = e.message.content.map(b => (b.type === 'text' ? b.text : '')).join('\n')
+    const ended = [...text.matchAll(TASK_ENDED)].map(m => m[1])
+    if (ended.length > 0 && (await read($, background)).some(t => ended.includes(t.id))) {
+      await update($, background, list => list.filter(t => !ended.includes(t.id)))
+      await writeSelf($, true)
+    }
+    return kept
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {

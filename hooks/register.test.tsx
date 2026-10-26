@@ -545,6 +545,39 @@ test('a background command keeps the session working after its turn, until a sto
   await after.unmount()
 })
 
+test('a task leaves the list when its end notification arrives, even if no stop hook ran', async ($, on) => {
+  const store = engine(on)
+  const saved = () => store.get('session:self-1') as Saved
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'run two jobs' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'pnpm test', run_in_background: true } as never)
+  await $.tool.call({ tool: 'Monitor', description: 'watch CI', timeout_ms: 300_000, command: 'gh run watch' } as never)
+  await $.turn.complete(TURN_END)
+  expect(saved().background?.map(t => t.id).sort()).toEqual(['b1', 'm1'])
+  expect(saved().isWorking).toBe(true)
+
+  const notify = (text: string, agentId?: string) =>
+    $.session.append({
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text }] },
+      door: 'prompt',
+      origin: { kind: 'task-notification' },
+      uuid: `u-${text.length}`,
+      ...(agentId ? { agentId } : {}),
+    } as never)
+  // A monitor's event names its task but reports no end, and a subagent's row is not the session's.
+  await notify('<task-notification><task-id>m1</task-id><event>build 3 passed</event></task-notification>')
+  await notify('<task-notification><task-id>b1</task-id><status>completed</status></task-notification>', 'a1')
+  expect(saved().background?.map(t => t.id).sort()).toEqual(['b1', 'm1'])
+
+  await notify(
+    '<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n</task-notification>',
+  )
+  expect(saved().background?.map(t => t.id)).toEqual(['m1'])
+  await notify('<task-notification><task-id>m1</task-id><status>killed</status></task-notification>')
+  expect(saved().background).toEqual([])
+  expect(saved().isWorking).toBe(false)
+})
+
 test("a stop's list names tasks the session never launched, leaves subagents out, and TaskStop ends a monitor", async ($, on) => {
   const store = engine(on)
   const saved = () => store.get('session:self-1') as Saved
