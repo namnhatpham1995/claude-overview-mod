@@ -116,6 +116,7 @@ export type SessionRecord = {
   project: string
   /** The last folder name of the session's working directory (a worktree's `<type>-<slug>`). */
   folder: string
+  /** A turn is running, or background work or a subagent still is. */
   isWorking: boolean
   /** Of the running turn when working, else of the last finished one. */
   tools: number
@@ -128,6 +129,8 @@ export type SessionRecord = {
   running?: Activity[]
   /** The subagents still running, each with its tool calls in flight. */
   subagents?: { description: string; type: string; startedAt: number; running: Activity[] }[]
+  /** Background shells, monitors and workflows still running; they keep the session working. */
+  background?: Activity[]
   /** The last finished turn's reflect lines, joined. */
   reflect: string | null
   /** The desktop app's id for the session (`local_…`); empty outside the app. */
@@ -158,6 +161,8 @@ declare module 'claude-code' {
       sessions: SessionRecord[]
       /** The main loop's tool calls in flight. */
       active: Activity[]
+      /** The session's background shells, monitors and workflows still running, by task id. */
+      background: Activity[]
       turn: TurnFacts | null
       last: TurnFacts | null
       agents: AgentRun[]

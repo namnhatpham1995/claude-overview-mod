@@ -16,7 +16,7 @@
 //   to any person obtaining a copy of this software, to deal in it without restriction,
 //   provided this notice is kept; the software is provided "as is", without warranty.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionRepo } from 'claude-code'
+import type { ClassicHookInputs, EngineInterface, Register, SessionRepo } from 'claude-code'
 
 import type {
   Activity,
@@ -74,6 +74,7 @@ const totals = atom({ plugin: 'overview', key: 'totals' } as const, {
 const now = atom({ plugin: 'overview', key: 'now' } as const, 0)
 const sessions = atom({ plugin: 'overview', key: 'sessions' } as const, [])
 const active = atom({ plugin: 'overview', key: 'active' } as const, [])
+const background = atom({ plugin: 'overview', key: 'background' } as const, [])
 const children = atom({ plugin: 'overview', key: 'children' } as const, [])
 const turnCost = atom({ plugin: 'overview', key: 'turnCost' } as const, null)
 const costs = atom({ plugin: 'overview', key: 'costs' } as const, [])
@@ -138,6 +139,32 @@ const activityLabel = (e: object): string => {
   if (path) return `${tool} ${baseName(path)}`
   const arg = field(e, 'pattern') || field(e, 'url') || field(e, 'query') || field(e, 'skill')
   return arg ? `${tool} ${clip(arg, 40)}` : tool
+}
+
+type BackgroundTask = NonNullable<ClassicHookInputs['Stop']['background_tasks']>[number]
+
+// A background task as the engine lists it at a stop, in the words a tool call's row uses.
+const taskLabel = (t: BackgroundTask): string => {
+  const clip = (text: string, n: number) => (text.length > n ? `${text.slice(0, n - 1)}…` : text)
+  if (t.type === 'shell') return `Shell: ${clip((t.command || t.description).replace(/\s+/g, ' '), 60)}`
+  const name = t.name || t.description
+  const kind = t.type.charAt(0).toUpperCase() + t.type.slice(1)
+  return name ? `${kind}: ${clip(name.replace(/\s+/g, ' '), 50)}` : kind
+}
+
+// The task a call left running in the background: a shell's id, a monitor's or a workflow's.
+const backgroundTaskOf = (e: object, result: unknown, started: number): Activity | null => {
+  const tool = String((e as { tool?: unknown }).tool)
+  const r = (result ?? {}) as { backgroundTaskId?: unknown; taskId?: unknown; workflowName?: unknown }
+  const id = tool === 'Bash' || tool === 'PowerShell' ? r.backgroundTaskId : tool === 'Monitor' || tool === 'Workflow' ? r.taskId : undefined
+  if (typeof id !== 'string' || !id) return null
+  const label =
+    tool === 'Monitor'
+      ? `Monitor: ${field(e, 'description')}`
+      : tool === 'Workflow'
+        ? `Workflow: ${typeof r.workflowName === 'string' && r.workflowName ? r.workflowName : 'run'}`
+        : activityLabel(e)
+  return { id, label, startedAt: started }
 }
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`
@@ -631,6 +658,7 @@ async function writeSelf($: EngineInterface, force: boolean): Promise<void> {
   const done = await read($, last)
   const runs = await read($, agents)
   const inFlight = await read($, active)
+  const backgroundNow = await read($, background)
   const shown = live ?? done
   const subagentsNow = runs.filter(a => a.status === 'running')
   const current = await read($, turnCost)
@@ -654,7 +682,8 @@ async function writeSelf($: EngineInterface, force: boolean): Promise<void> {
     title,
     project,
     folder,
-    isWorking: live !== null,
+    // Work left running in the background is the session's work too, though no turn runs.
+    isWorking: live !== null || backgroundNow.length > 0 || subagentsNow.length > 0,
     tools: shown?.tools ?? 0,
     edits: shown?.edits.length ?? 0,
     failed: shown?.failed.length ?? 0,
@@ -667,6 +696,7 @@ async function writeSelf($: EngineInterface, force: boolean): Promise<void> {
       startedAt: a.startedAt,
       running: a.running ?? [],
     })),
+    background: backgroundNow.slice(-ACTIVITY_MAX),
     reflect: done ? reflect(done, runs).join(' · ') : null,
     hostId,
     children: await read($, children),
@@ -766,13 +796,14 @@ export const register: Register = (on, options) => {
       name: COMMAND,
       description: 'Overview: toggle the pane; "/coach heads-up" runs one side check (uses tokens)',
     })
-    // Ticks elapsed times while a subagent runs, and the blinking cards while the pane shows a
-    // working session; quiet otherwise.
+    // Ticks elapsed times while a subagent or background task runs, and the blinking cards while
+    // the pane shows a working session; quiet otherwise.
     $.clock.every(BLINK_MS, () => {
       void (async () => {
         const list = await read($, agents)
         const inFlight = await read($, active)
-        if (inFlight.length === 0 && !list.some(a => a.status === 'running')) {
+        const isBackgroundBusy = (await read($, background)).length > 0
+        if (inFlight.length === 0 && !isBackgroundBusy && !list.some(a => a.status === 'running')) {
           if (!(await read($, sessions)).some(s => s.isWorking)) return
           if (!(await $.ui.panes()).some(p => p.id === PANE)) return
         }
@@ -869,6 +900,17 @@ export const register: Register = (on, options) => {
     } finally {
       await trackActivity($, e.agentId, list => list.filter(a => a.id !== call.id))
     }
+    // The main loop's background work: shown at once, then held to the engine's list at each stop.
+    if (!e.agentId && ran.deny === undefined && ran.isError !== true) {
+      const task = backgroundTaskOf(e, ran.result, started)
+      const stopped = String(e.tool) === 'TaskStop' ? field(e, 'task_id') || field(e, 'shell_id') : ''
+      if (task || stopped) {
+        await update($, background, list =>
+          task ? [...list.filter(t => t.id !== task.id), task].slice(-ACTIVITY_MAX) : list.filter(t => t.id !== stopped),
+        )
+        await writeSelf($, true)
+      }
+    }
     // A session this one starts or briefs is its worker: the call names it by its `local_…` id.
     if (BRIEF_TOOL.test(String(e.tool)) && ran.deny === undefined && ran.isError !== true) {
       const named = `${JSON.stringify(e)} ${ran.text ?? ''}`.match(HOST_ID) ?? []
@@ -897,6 +939,26 @@ export const register: Register = (on, options) => {
     )
     await writeSelf($, false)
     return ran
+  }).catch(($, e, next) => next(e))
+
+  // When the main loop stops, the engine lists the work still in flight; that list replaces ours,
+  // so a task that ended between stops never keeps the session working. Subagents have their own
+  // events, and an engine that sends no list leaves none running.
+  on('classic.Stop', async ($, e, next) => {
+    const stopped = await next(e)
+    const at = await $.clock.now()
+    await update($, background, prev =>
+      (e.background_tasks ?? [])
+        .filter(t => t.type !== 'subagent')
+        .slice(-ACTIVITY_MAX)
+        .map((t): Activity => {
+          const known = prev.find(p => p.id === t.id)
+          return { id: t.id, label: known?.label ?? taskLabel(t), startedAt: known?.startedAt ?? at }
+        }),
+    )
+    await writeSelf($, true)
+    await refreshSessions($)
+    return stopped
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {
@@ -1052,8 +1114,27 @@ export const register: Register = (on, options) => {
     const runs = await read($, agents)
     const running = runs.filter(a => a.status === 'running').length
     const inFlight = await read($, active)
+    const tasks = await read($, background)
 
     const rows = []
+    // Between turns, work still running in the background keeps the session working.
+    if (!(e.props.isWorking && live) && (tasks.length > 0 || running > 0)) {
+      const at = Math.max(await read($, now), ...tasks.map(t => t.startedAt))
+      rows.push(
+        <Text dimColor>
+          ● working in the background
+          {tasks.length > 0 ? ` · ${plural(tasks.length, 'task')}` : ''}
+          {running > 0 ? ` · ${plural(running, 'subagent')} running` : ''}
+        </Text>,
+      )
+      for (const task of tasks.slice(-2)) {
+        rows.push(
+          <Text dimColor>
+            {'  '}◦ {task.label} · {fmtTime(at - task.startedAt)}
+          </Text>,
+        )
+      }
+    }
     if (e.props.isWorking && live) {
       const at = Math.max(await read($, now), live.startedAt, ...inFlight.map(a => a.startedAt))
       rows.push(
@@ -1330,16 +1411,24 @@ export const register: Register = (on, options) => {
       const age = at - s.updatedAt
       const isStale = age > STALE_MS
       const isSelf = s.id === selfId
+      const tasks = s.background ?? []
+      // No turn runs (null; older records leave it out) while background work keeps it working.
+      const isBetweenTurns = s.turnStartedAt === null
       const state = isStale
         ? `no update for ${fmtTime(age)}`
-        : s.isWorking
-          ? `working ${s.turnStartedAt ? fmtTime(at - s.turnStartedAt) : ''}`.trim()
-          : 'idle'
+        : !s.isWorking
+          ? 'idle'
+          : s.turnStartedAt
+            ? `working ${fmtTime(at - s.turnStartedAt)}`
+            : isBetweenTurns
+              ? 'working in the background'
+              : 'working'
       const counts = [
         plural(s.tools, 'tool call'),
         s.edits > 0 ? `${plural(s.edits, 'file')} edited` : '',
         s.failed > 0 ? `${s.failed} failed` : '',
         s.subagentsRunning > 0 ? `${plural(s.subagentsRunning, 'subagent')} running` : '',
+        tasks.length > 0 ? `${plural(tasks.length, 'background task')}` : '',
       ].filter(Boolean)
       const isController = workers.length > 0 || unseen > 0
       const roleColor = isController ? 'magenta' : depth > 0 ? 'blue' : 'gray'
@@ -1380,7 +1469,13 @@ export const register: Register = (on, options) => {
                 {callRows(sub.running, '  ')}
               </Box>
             ))}
-          {s.reflect && !s.isWorking && <Text dimColor>{s.reflect}</Text>}
+          {!isStale &&
+            tasks.map(task => (
+              <Text dimColor>
+                ◦ {task.label} · {fmtTime(Math.max(0, at - task.startedAt))} (background)
+              </Text>
+            ))}
+          {s.reflect && (!s.isWorking || isBetweenTurns) && <Text dimColor>{s.reflect}</Text>}
           {s.tokens && (
             <Box gap={1}>
               <Text>

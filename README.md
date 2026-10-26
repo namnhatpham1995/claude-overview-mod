@@ -58,6 +58,17 @@ It shows the running time, tool calls, edited files, running subagents, failed c
 tool calls in flight. The only button while working is **Overview** (with the number of running
 subagents).
 
+Between turns, work left running in the background still counts as the session's work:
+
+```
+● working in the background · 1 task
+  ◦ Bash: pnpm test · 2m 10s
+```
+
+Background shells, monitors and workflows are added when the call that starts them returns, and at
+each stop the engine's own list of work still in flight replaces them, so a finished task does not
+linger. Background subagents count too.
+
 After a turn, the **✦ Reflect** line gives up to three findings from what the turn did:
 
 - the turn was interrupted;
@@ -92,8 +103,9 @@ Open it with the **Overview** button or `/coach`. It has four sections.
 - A **controller** (magenta) is a session that started or briefed other sessions; its **workers**
   (blue) are nested under it. The link comes from the calls that start, message or clear a
   session, since the app does not record it.
-- A working session's border blinks cyan. A session with no update for 3 minutes is shown dim as
-  stale; records older than a day are deleted.
+- A working session's border blinks cyan. A session whose turn has ended but whose background
+  tasks or subagents still run reads **working in the background**, with each task listed. A
+  session with no update for 3 minutes is shown dim as stale; records older than a day are deleted.
 - Each card shows the project and folder, tool calls, edits, failures, the calls and subagents in
   flight, the last reflection, and the tokens: `tokens 2.4M · 35% (4.1%) · $3.20` is the
   session's tokens, its share of all listed sessions' use, its share of the five-hour limit, and

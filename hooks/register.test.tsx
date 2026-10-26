@@ -108,9 +108,15 @@ function engine(on: Parameters<TestBody>[1], fork?: () => ModelForkResult, seed:
     if (e.tool === 'mcp__ccd_session__start_session') {
       return { result: {}, text: `Started session "Check the tree" (session_id: ${WORKER_HOST}, name: check-tree)` }
     }
+    // A background launch answers at once with the task's id.
+    if ((e as { run_in_background?: boolean }).run_in_background) {
+      return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' } }
+    }
+    if (e.tool === 'Monitor') return { result: { taskId: 'm1', timeoutMs: 300_000 } }
     return (e.tool === 'Bash' || e.tool === 'PowerShell') && command.includes('false') ? { result: {}, isError: true } : { result: {} }
   })
   on('turn.complete', () => ({ text: 'done' }))
+  on('classic.Stop', () => ({}))
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'a1' }))
   on('ui.status', (_, e) => {
@@ -397,6 +403,91 @@ test("a working session's card border blinks a second lit, a second dim; idle an
   expect(['cyan', 'gray']).toContain(card?.props.borderColor)
   expect(card?.props.borderDimColor).toBe(card?.props.borderColor === 'gray')
   await pane.unmount()
+})
+
+type Saved = { isWorking: boolean; turnStartedAt?: number | null; background?: { id: string; label: string }[] }
+
+test('a background command keeps the session working after its turn, until a stop no longer lists it', async ($, on) => {
+  const store = engine(on)
+  const saved = () => store.get('session:self-1') as Saved
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'run the suite' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'pnpm test', run_in_background: true } as never)
+  await $.turn.complete(TURN_END)
+  await $.classic.Stop({
+    stop_hook_active: false,
+    background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'pnpm test', command: 'pnpm test' }],
+  } as never)
+
+  expect(saved().isWorking).toBe(true)
+  expect(saved().turnStartedAt).toBeNull()
+  expect(saved().background?.map(t => t.label)).toEqual(['Bash: pnpm test'])
+  await $.command.run({ command: 'coach', args: '' } as never)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await pane.find({ type: 'Text', text: /\(this session\)/ }))?.text).toContain('working in the background')
+  expect((await pane.find({ type: 'Text', text: /1 tool call/ }))?.text).toContain('1 background task')
+  expect((await pane.find({ type: 'Text', text: /◦ Bash: pnpm test/ }))?.text).toContain('(background)')
+  await pane.unmount()
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const band = await $.ui.mount({ ...BAND, surface })
+    expect((await band.find({ type: 'Text', text: /working in the background/ }))?.text).toContain('1 task')
+    expect(await band.find({ type: 'Text', text: /◦ Bash: pnpm test/ })).toBeDefined()
+    await band.unmount()
+  }
+
+  // The task's notification starts a turn, and its stop lists nothing left in flight.
+  await $.prompt.submit({ text: '<task-notification><task-id>b1</task-id><status>completed</status></task-notification>' } as never)
+  await $.turn.complete(TURN_END)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] } as never)
+  expect(saved().isWorking).toBe(false)
+  expect(saved().background).toEqual([])
+  const after = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await after.find({ type: 'Text', text: /\(this session\)/ }))?.text).toContain('idle')
+  await after.unmount()
+})
+
+test("a stop's list names tasks the session never launched, leaves subagents out, and TaskStop ends a monitor", async ($, on) => {
+  const store = engine(on)
+  const saved = () => store.get('session:self-1') as Saved
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'watch CI' } as never)
+  await $.tool.call({ tool: 'Monitor', description: 'watch CI', timeout_ms: 300_000, command: 'gh run watch' } as never)
+  expect(saved().background?.map(t => t.label)).toEqual(['Monitor: watch CI'])
+  await $.turn.complete(TURN_END)
+  await $.classic.Stop({
+    stop_hook_active: false,
+    background_tasks: [
+      { id: 'm1', type: 'monitor', status: 'running', description: 'watch CI' },
+      { id: 'w1', type: 'workflow', status: 'running', description: 'Review changes', name: 'review-changes' },
+      { id: 'a9', type: 'subagent', status: 'running', description: 'Find config', agent_type: 'Explore' },
+    ],
+  } as never)
+  expect(saved().background?.map(t => t.label)).toEqual(['Monitor: watch CI', 'Workflow: review-changes'])
+
+  await $.prompt.submit({ text: 'stop watching' } as never)
+  await $.tool.call({ tool: 'TaskStop', task_id: 'm1' } as never)
+  expect(saved().background?.map(t => t.id)).toEqual(['w1'])
+  expect(saved().isWorking).toBe(true)
+})
+
+test('a background subagent still running after the main turn keeps the session working', async ($, on) => {
+  const store = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'look around' } as never)
+  await $.agent.spawn({
+    tool_use_id: 'tu1',
+    prompt: 'find the config',
+    description: 'Find config',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: true,
+    fork: false,
+  } as never)
+  await $.turn.complete(TURN_END)
+  expect((store.get('session:self-1') as Saved).isWorking).toBe(true)
+  await $.turn.complete({ ...TURN_END, agentId: 'a1' })
+  expect((store.get('session:self-1') as Saved).isWorking).toBe(false)
 })
 
 const STEP = { turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 3 } as const
