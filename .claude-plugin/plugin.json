@@ -1,0 +1,15 @@
+{
+  "name": "overview",
+  "version": "0.1.0",
+  "description": "Usage limits under the prompt, an Overview pane of sessions, workers, subagents and where tokens went, a reflection band after each turn and an on-demand heads-up check.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "headsUp": {
+      "type": "string",
+      "title": "Heads-up checks",
+      "description": "manual: only when you press Heads-up or run /coach heads-up (no tokens otherwise); auto: also after a long turn (10+ tool calls), at most every 10 minutes. Each check is one model request.",
+      "default": "manual",
+      "options": ["manual", "auto"]
+    }
+  }
+}
