@@ -882,7 +882,7 @@ export const register: Register = (on, options) => {
     if (!current) return ran
     const tool = String(e.tool)
     const path = EDIT_TOOLS.has(tool) ? field(e, 'file_path') || field(e, 'notebook_path') : ''
-    const command = tool === 'Bash' ? field(e, 'command') : ''
+    const command = tool === 'Bash' || tool === 'PowerShell' ? field(e, 'command') : ''
     const hasFailed = ran.deny === undefined && ran.isError === true
     await update($, turn, t =>
       t
@@ -891,7 +891,7 @@ export const register: Register = (on, options) => {
             tools: t.tools + 1,
             edits: path && !t.edits.includes(path) ? [...t.edits, path] : t.edits,
             checksRan: t.checksRan || (command !== '' && CHECK_COMMAND.test(command)),
-            failed: hasFailed ? [...t.failed, command ? `Bash ${command.slice(0, 30)}` : tool].slice(-10) : t.failed,
+            failed: hasFailed ? [...t.failed, command ? `${tool} ${command.slice(0, 30)}` : tool].slice(-10) : t.failed,
           }
         : t,
     )

@@ -108,7 +108,7 @@ function engine(on: Parameters<TestBody>[1], fork?: () => ModelForkResult, seed:
     if (e.tool === 'mcp__ccd_session__start_session') {
       return { result: {}, text: `Started session "Check the tree" (session_id: ${WORKER_HOST}, name: check-tree)` }
     }
-    return e.tool === 'Bash' && command.includes('false') ? { result: {}, isError: true } : { result: {} }
+    return (e.tool === 'Bash' || e.tool === 'PowerShell') && command.includes('false') ? { result: {}, isError: true } : { result: {} }
   })
   on('turn.complete', () => ({ text: 'done' }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
@@ -181,6 +181,22 @@ test('running the tests clears the no-checks warning', async ($, on) => {
   const line = await ui.find({ type: 'Text', text: /Reflect/ })
   expect(line?.text).not.toContain('no tests or checks ran')
   expect(line?.text).toContain('Edge cases')
+  await ui.unmount()
+})
+
+test('PowerShell checks clear the no-checks warning, and a failed PowerShell call is named', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'fix it' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'PowerShell', command: 'npx tsc --noEmit' } as never)
+  await $.tool.call({ tool: 'PowerShell', command: 'Get-Item false' } as never)
+  await $.turn.complete(TURN_END)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const line = await ui.find({ type: 'Text', text: /Reflect/ })
+  expect(line?.text).not.toContain('no tests or checks ran')
+  expect(line?.text).toContain('1 tool call failed (PowerShell Get-Item false)')
   await ui.unmount()
 })
 
