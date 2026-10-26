@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { ModelForkResult } from 'claude-code'
 
-import { boldText, cardBorder, estimateLeft, fmtClock, italicText, limitCards, limitLine, limitShare, savingTips, snippet, spentInWindow, underlineText } from './register'
+import { boldText, byRank, cardBorder, estimateLeft, fmtClock, italicText, limitCards, limitLine, limitShare, questionsIn, savingTips, snippet, spentInWindow, underlineText } from './register'
 
 const BAND = {
   plugin: 'overview',
@@ -276,7 +276,7 @@ const record = (id: string, folder: string, updatedAt: number, isWorking = false
   updatedAt,
 })
 
-test('the pane lists this session first, then other sessions with their state', async ($, on) => {
+test('the pane lists this session and other sessions with their state', async ($, on) => {
   engine(on, undefined, { 'session:w1': record('w1', 'fix-login-form', 1_000_000, true) })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.prompt.submit({ text: 'go' } as never)
@@ -402,6 +402,105 @@ test("a working session's card border blinks a second lit, a second dim; idle an
   const card = (await pane.findAll({ type: 'Box', text: /Blink check/ })).filter(b => b.props.borderStyle).at(-1)
   expect(['cyan', 'gray']).toContain(card?.props.borderColor)
   expect(card?.props.borderDimColor).toBe(card?.props.borderColor === 'gray')
+  await pane.unmount()
+})
+
+test('working sessions come first, then those that spent tokens by their latest work, empty ones last', () => {
+  const working = { isWorking: true, lastWorkedAt: 100, hasTokens: false }
+  const recent = { isWorking: false, lastWorkedAt: 900, hasTokens: true }
+  const older = { isWorking: false, lastWorkedAt: 500, hasTokens: true }
+  const empty = { isWorking: false, lastWorkedAt: 950, hasTokens: false }
+  expect([empty, older, recent, working].sort(byRank)).toEqual([working, recent, older, empty])
+})
+
+test('the pane orders cards by work, a working worker lifts its controller, and unrelated cards are spaced apart', async ($, on) => {
+  const spent = { input: 10, cacheWrite: 0, cacheRead: 0, output: 5 }
+  engine(on, undefined, {
+    'session:old': { ...record('old', 'f', 1_000_000), title: 'Older idle', tokens: spent, lastWorkedAt: 500_000 },
+    'session:new': { ...record('new', 'f', 1_000_000), title: 'Recent idle', tokens: spent, lastWorkedAt: 900_000 },
+    'session:none': { ...record('none', 'f', 1_000_000), title: 'Never spent', lastWorkedAt: 990_000 },
+    'session:boss': {
+      ...record('boss', 'f', 1_000_000),
+      title: 'Idle controller',
+      tokens: spent,
+      lastWorkedAt: 100_000,
+      children: [WORKER_HOST],
+    },
+    'session:busy': { ...record('busy', 'f', 1_000_000, true), title: 'Busy worker', hostId: WORKER_HOST, tokens: spent },
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'coach', args: '' } as never)
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const titles = (await pane.findAll({ type: 'Text', text: /Idle controller|Busy worker|Recent idle|Older idle|Never spent/ }))
+    .map(t => /Idle controller|Busy worker|Recent idle|Older idle|Never spent/.exec(t.text ?? '')?.[0])
+    .filter((t, i, all) => t && all.indexOf(t) === i)
+  expect(titles).toEqual(['Idle controller', 'Busy worker', 'Recent idle', 'Older idle', 'Never spent'])
+  // The cards sit in one column with a blank row between them; a worker stays inside its controller's card.
+  const column = (await pane.findAll({ type: 'Box', text: /Older idle/ })).find(b => b.props.gap === 1 && !b.props.borderStyle && /Recent idle/.test(b.text ?? ''))
+  expect(column).toBeDefined()
+  await pane.unmount()
+})
+
+test("this session's subagents are listed inside its own card, not in a box of their own", async ($, on) => {
+  engine(on, undefined, { 'session:w5': { ...record('w5', 'f', 1_000_000), title: 'Other session' } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'look around' } as never)
+  await $.agent.spawn({
+    tool_use_id: 'tu1',
+    prompt: 'find the config',
+    description: 'Find config',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: false,
+    fork: false,
+  } as never)
+  await $.command.run({ command: 'coach', args: '' } as never)
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const framed = async (text: RegExp) => (await pane.findAll({ type: 'Box', text })).filter(b => b.props.borderStyle).at(-1)
+  expect((await framed(/\(this session\)/))?.text).toContain('Find config')
+  expect((await framed(/Other session/))?.text).not.toContain('Find config')
+  // The only frame titled Subagents is the one in the card.
+  expect((await framed(/Subagents/))?.text).not.toContain('(this session)')
+  expect((await framed(/Subagents/))?.text).toContain('Find config')
+  await pane.unmount()
+})
+
+test("an answer's questions are its sentences ending in a question mark, outside code, without markdown", () => {
+  const answer = [
+    'I fixed the parser. Tests pass.',
+    '```ts',
+    'const ok = a ?? b // why?',
+    '```',
+    '- **Should I also migrate the old rows?** They are unused.',
+    'Which branch do you want it on? I can push either.',
+    'Ok?',
+  ].join('\n')
+  expect(questionsIn(answer)).toEqual(['Should I also migrate the old rows?', 'Which branch do you want it on?'])
+  expect(questionsIn('All done, nothing pending.')).toEqual([])
+})
+
+test("Last turn shows what Claude asked, and another session's card shows what it waits on", async ($, on) => {
+  const store = engine(on, undefined, {
+    'session:w6': { ...record('w6', 'f', 1_000_000), title: 'Waiting worker', turnStartedAt: null, questions: ['Merge PR 12 now?'] },
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'fix it' } as never)
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Fixed.', ask: 'Push the fix?' } as never)
+  await $.turn.complete({ ...TURN_END, answer: 'Fixed the bug. Should I also add a test for the empty case?' })
+  expect((store.get('session:self-1') as { questions?: string[] }).questions).toEqual([
+    'Push the fix?',
+    'Should I also add a test for the empty case?',
+  ])
+  await $.command.run({ command: 'coach', args: '' } as never)
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const lastTurn = (await pane.findAll({ type: 'Box', text: /Last turn/ })).filter(b => b.props.borderStyle).at(-1)
+  expect(lastTurn?.text).toContain('Claude asks · Push the fix?')
+  expect(lastTurn?.text).toContain('Claude asks · Should I also add a test for the empty case?')
+  expect((await pane.find({ type: 'Text', text: /asks · Merge PR 12 now\?/ }))?.text).toBe('? asks · Merge PR 12 now?')
   await pane.unmount()
 })
 

@@ -10,6 +10,8 @@ export type TurnFacts = {
   /** Short labels of the tool calls that came back as errors. */
   failed: string[]
   isAborted: boolean
+  /** Questions Claude left for the person: from its last answer and its next-step box; absent on older turns. */
+  questions?: string[]
 }
 
 export type AgentStatus = 'running' | 'done' | 'failed'
@@ -118,6 +120,8 @@ export type SessionRecord = {
   folder: string
   /** A turn is running, or background work or a subagent still is. */
   isWorking: boolean
+  /** When it last worked: now while working, else when its work ended; 0 before any. */
+  lastWorkedAt?: number
   /** Of the running turn when working, else of the last finished one. */
   tools: number
   edits: number
@@ -133,6 +137,8 @@ export type SessionRecord = {
   background?: Activity[]
   /** The last finished turn's reflect lines, joined. */
   reflect: string | null
+  /** What the last finished turn asked the person, so a controller sees what a worker waits on. */
+  questions?: string[]
   /** The desktop app's id for the session (`local_…`); empty outside the app. */
   hostId?: string
   /** The `local_…` ids of the sessions this one started or sent work to: its workers. */
@@ -163,6 +169,8 @@ declare module 'claude-code' {
       active: Activity[]
       /** The session's background shells, monitors and workflows still running, by task id. */
       background: Activity[]
+      /** When this session's record last said it was working; 0 before that. */
+      lastWorkedAt: number
       turn: TurnFacts | null
       last: TurnFacts | null
       agents: AgentRun[]

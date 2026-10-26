@@ -75,6 +75,7 @@ const now = atom({ plugin: 'overview', key: 'now' } as const, 0)
 const sessions = atom({ plugin: 'overview', key: 'sessions' } as const, [])
 const active = atom({ plugin: 'overview', key: 'active' } as const, [])
 const background = atom({ plugin: 'overview', key: 'background' } as const, [])
+const lastWorkedAt = atom({ plugin: 'overview', key: 'lastWorkedAt' } as const, 0)
 const children = atom({ plugin: 'overview', key: 'children' } as const, [])
 const turnCost = atom({ plugin: 'overview', key: 'turnCost' } as const, null)
 const costs = atom({ plugin: 'overview', key: 'costs' } as const, [])
@@ -392,6 +393,23 @@ export function cardBorder(s: { isWorking: boolean; isStale: boolean; roleColor:
   return isLit ? { color: 'cyan', isDim: false } : { color: 'gray', isDim: true }
 }
 
+/** What places a session card in the pane, its workers' work counted as its own. */
+export type SessionRank = { isWorking: boolean; lastWorkedAt: number; hasTokens: boolean }
+
+export const rankOf = (s: SessionRecord, at: number): SessionRank => ({
+  isWorking: s.isWorking && at - s.updatedAt <= STALE_MS,
+  // Records from before this field have no time of their own; a working one worked at its last update.
+  lastWorkedAt: s.lastWorkedAt ?? (s.isWorking ? s.updatedAt : 0),
+  hasTokens: s.tokens !== undefined && tokenSum(s.tokens) > 0,
+})
+
+/** Working sessions first, then sessions that spent tokens, each group by the latest work first. */
+export function byRank(a: SessionRank, b: SessionRank): number {
+  if (a.isWorking !== b.isWorking) return a.isWorking ? -1 : 1
+  if (a.hasTokens !== b.hasTokens) return a.hasTokens ? -1 : 1
+  return b.lastWorkedAt - a.lastWorkedAt
+}
+
 /** The line under the prompt in every session: each limit on one line, side by side. */
 export function limitLine(records: readonly SessionRecord[], at: number): string | undefined {
   const cards = limitCards(records, at)
@@ -531,6 +549,26 @@ async function checkSavings($: EngineInterface): Promise<void> {
 }
 
 /** The reflection lines for a finished turn: evidence first, then the questions it raises. */
+const QUESTIONS_MAX = 3
+// The desktop app's next-step box: its `ask` is the one decision the turn leaves the person.
+const WRAP_UP_TOOL = /^mcp__ccd_turn__wrap_up$/
+
+/**
+ * The questions an answer puts to the person, read from its text alone (no model call): each
+ * sentence ending in "?" outside code, its markdown marks dropped, the last few kept.
+ */
+export function questionsIn(answer: string): string[] {
+  const prose = answer.replace(/```[\s\S]*?```/g, '\n').replace(/<[a-z_-]+>[\s\S]*?<\/[a-z_-]+>/gi, '\n')
+  const found = prose
+    .split(/\n+/)
+    .map(line => line.replace(/\*\*|__|`/g, '').replace(/^\s*(?:[-*+>]|#+|\d+[.)])\s*/, ''))
+    .flatMap(line => line.split(/(?<=[.!?])\s+(?=[A-Z"'(])/))
+    .map(s => s.trim())
+    .filter(s => s.endsWith('?') && s.length >= 8)
+    .map(s => (s.length > 160 ? `${s.slice(0, 159)}…` : s))
+  return [...new Set(found)].slice(-QUESTIONS_MAX)
+}
+
 export function reflect(t: TurnFacts, runs: readonly AgentRun[]): string[] {
   const lines: string[] = []
   if (t.isAborted) lines.push('Turn was interrupted: check what was left half done')
@@ -674,6 +712,11 @@ async function writeSelf($: EngineInterface, force: boolean): Promise<void> {
   )
   const items = [...(await read($, costs)), ...(current ? [current] : []), ...agentItems]
   const spent = items.reduce((s, i) => addSplit(s, i.split), noTokens())
+  // Work left running in the background is the session's work too, though no turn runs.
+  const isWorking = live !== null || backgroundNow.length > 0 || subagentsNow.length > 0
+  if (isWorking) await update($, lastWorkedAt, () => at)
+  // Before its first working write (a reload, an older mod), the last turn's end stands in.
+  const workedAt = (await read($, lastWorkedAt)) || (done ? done.startedAt + done.seconds * 1000 : 0)
   const usage = await $.session.usage().catch(() => null)
   const five = usage?.rateLimits.find(r => r.kind === 'five_hour')
   const week = usage?.rateLimits.find(r => r.kind === 'seven_day')
@@ -682,8 +725,8 @@ async function writeSelf($: EngineInterface, force: boolean): Promise<void> {
     title,
     project,
     folder,
-    // Work left running in the background is the session's work too, though no turn runs.
-    isWorking: live !== null || backgroundNow.length > 0 || subagentsNow.length > 0,
+    isWorking,
+    lastWorkedAt: workedAt,
     tools: shown?.tools ?? 0,
     edits: shown?.edits.length ?? 0,
     failed: shown?.failed.length ?? 0,
@@ -698,6 +741,7 @@ async function writeSelf($: EngineInterface, force: boolean): Promise<void> {
     })),
     background: backgroundNow.slice(-ACTIVITY_MAX),
     reflect: done ? reflect(done, runs).join(' · ') : null,
+    questions: done?.questions ?? [],
     hostId,
     children: await read($, children),
     tokens: spent,
@@ -933,6 +977,10 @@ export const register: Register = (on, options) => {
             tools: t.tools + 1,
             edits: path && !t.edits.includes(path) ? [...t.edits, path] : t.edits,
             checksRan: t.checksRan || (command !== '' && CHECK_COMMAND.test(command)),
+            questions:
+              WRAP_UP_TOOL.test(tool) && field(e, 'ask').trim()
+                ? [...(t.questions ?? []), field(e, 'ask').trim()]
+                : t.questions,
             failed: hasFailed ? [...t.failed, command ? `${tool} ${command.slice(0, 30)}` : tool].slice(-10) : t.failed,
           }
         : t,
@@ -1061,6 +1109,8 @@ export const register: Register = (on, options) => {
       ...current,
       seconds: Math.round((at - current.startedAt) / 1000),
       isAborted: e.isAborted,
+      // The next-step box's question first, then the answer's own; one asked in both shows once.
+      questions: [...new Set([...(current.questions ?? []), ...questionsIn(e.answer)])].slice(0, QUESTIONS_MAX),
     }
     const spent = await read($, turnCost)
     if (spent) {
@@ -1329,7 +1379,19 @@ export const register: Register = (on, options) => {
         if (child && child.id !== s.id) parentOf.set(child.id, s)
       }
     }
-    const workersOf = (s: SessionRecord) => records.filter(r => parentOf.get(r.id)?.id === s.id)
+    // A controller ranks by its busiest, latest worker too, so a working worker lifts its tree.
+    const treeRank = (s: SessionRecord, depth: number): SessionRank => {
+      const ranks = [rankOf(s, at), ...(depth < 3 ? childrenOf(s).map(w => treeRank(w, depth + 1)) : [])]
+      return {
+        isWorking: ranks.some(r => r.isWorking),
+        lastWorkedAt: Math.max(...ranks.map(r => r.lastWorkedAt)),
+        hasTokens: ranks.some(r => r.hasTokens),
+      }
+    }
+    const childrenOf = (s: SessionRecord) => records.filter(r => parentOf.get(r.id)?.id === s.id)
+    const ranked = (list: SessionRecord[]) =>
+      list.map(s => ({ s, rank: treeRank(s, 0) })).sort((a, b) => byRank(a.rank, b.rank)).map(x => x.s)
+    const workersOf = (s: SessionRecord) => ranked(childrenOf(s))
     const machineWeight = records.reduce((n, s) => n + (s.tokens ? weight(s.tokens) : 0), 0)
     const fiveHour = newestLimit(records)
     const estimate = estimateLeft(records, fiveHour?.percentUsed ?? 0)
@@ -1460,15 +1522,22 @@ export const register: Register = (on, options) => {
             {[where(s), counts.join(' · ')].filter(Boolean).join('  ·  ')}
           </Text>
           {!isStale && callRows(s.running ?? [], '')}
+          {/* This session knows its finished subagents too; another's record holds its running ones. */}
           {!isStale &&
-            (s.subagents ?? []).map(sub => (
-              <Box flexDirection="column">
-                <Text dimColor>
-                  ↳ {sub.type}: {sub.description} · {fmtTime(at - sub.startedAt)}
-                </Text>
-                {callRows(sub.running, '  ')}
-              </Box>
-            ))}
+            (isSelf ? list.length > 0 : (s.subagents ?? []).length > 0) &&
+            part(
+              'Subagents',
+              isSelf
+                ? [...running.map(row), ...finished.slice(0, 15).map(row)]
+                : (s.subagents ?? []).map(sub => (
+                    <Box flexDirection="column">
+                      <Text dimColor>
+                        ↳ {sub.type}: {sub.description} · {fmtTime(at - sub.startedAt)}
+                      </Text>
+                      {callRows(sub.running, '  ')}
+                    </Box>
+                  )),
+            )}
           {!isStale &&
             tasks.map(task => (
               <Text dimColor>
@@ -1476,6 +1545,15 @@ export const register: Register = (on, options) => {
               </Text>
             ))}
           {s.reflect && (!s.isWorking || isBetweenTurns) && <Text dimColor>{s.reflect}</Text>}
+          {/* What another session waits on you for; this session's own are in Last turn. */}
+          {!isSelf &&
+            !isStale &&
+            !s.turnStartedAt &&
+            (s.questions ?? []).map(q => (
+              <Text>
+                <Text color="yellow">? asks</Text> · {q}
+              </Text>
+            ))}
           {s.tokens && (
             <Box gap={1}>
               <Text>
@@ -1517,15 +1595,13 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // Controllers and unlinked sessions are roots, this session first; a loop of links falls back to roots.
+    // Controllers and unlinked sessions are roots, working ones first, then by their latest work, the
+    // ones that never spent a token last; a loop of links falls back to roots.
     const seen = new Set<string>()
     const cards: JSX.Element[] = []
-    const roots = [...records.filter(s => s.id === selfId), ...records.filter(s => s.id !== selfId)].filter(
-      s => !parentOf.has(s.id),
-    )
+    const roots = ranked(records.filter(s => !parentOf.has(s.id)))
     for (const s of roots.slice(0, 12)) cards.push(sessionCard(s, 0, seen))
-    for (const s of records) if (!seen.has(s.id) && cards.length < 16) cards.push(sessionCard(s, 0, seen))
-
+    for (const s of ranked(records)) if (!seen.has(s.id) && cards.length < 16) cards.push(sessionCard(s, 0, seen))
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -1536,14 +1612,27 @@ export const register: Register = (on, options) => {
               tokens · N% of the listed sessions' use (N% of the 5h limit); — until that session runs the newest mod
             </Text>
           ),
-          ...cards,
+          // A blank row between unrelated sessions; a controller's workers stay inside its card.
+          cards.length > 0 && (
+            <Box flexDirection="column" gap={1}>
+              {cards}
+            </Box>
+          ),
         ])}
-        {section('Subagents', 'cyan', [
-          list.length === 0 && <Text dimColor>No subagents in this session yet.</Text>,
-          ...running.map(row),
-          ...finished.slice(0, 15).map(row),
-        ])}
-        {section('Last turn', 'green', done ? reflect(done, list).map(line => <Text>· {line}</Text>) : [<Text dimColor>No finished turn yet.</Text>])}
+        {section(
+          'Last turn',
+          'green',
+          done
+            ? [
+                ...reflect(done, list).map(line => <Text>· {line}</Text>),
+                ...(done.questions ?? []).map(q => (
+                  <Text>
+                    <Text color="yellow">? Claude asks</Text> · {q}
+                  </Text>
+                )),
+              ]
+            : [<Text dimColor>No finished turn yet.</Text>],
+        )}
         {section('Session', 'gray', [
           <Text dimColor>
             {plural(t.turns, 'turn')} · {plural(t.checks, 'heads-up check')} costing {fmtTokens(t.checkTokensIn)} in,{' '}

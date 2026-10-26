@@ -96,9 +96,12 @@ that may be off, a failed step glossed over), in one sentence, or nothing.
 
 ### The Overview pane
 
-Open it with the **Overview** button or `/coach`. It has four sections.
+Open it with the **Overview** button or `/coach`. It has three sections.
 
-**Sessions on this machine**: one card per session running the mod, this session first.
+**Sessions on this machine**: one card per session running the mod, with a blank row between
+unrelated sessions. Working sessions come first (a controller counts as working while one of its
+workers does), then the others by when they last worked, newest first; sessions that never spent
+a token come last.
 
 - A **controller** (magenta) is a session that started or briefed other sessions; its **workers**
   (blue) are nested under it. The link comes from the calls that start, message or clear a
@@ -106,8 +109,9 @@ Open it with the **Overview** button or `/coach`. It has four sections.
 - A working session's border blinks cyan. A session whose turn has ended but whose background
   tasks or subagents still run reads **working in the background**, with each task listed. A
   session with no update for 3 minutes is shown dim as stale; records older than a day are deleted.
-- Each card shows the project and folder, tool calls, edits, failures, the calls and subagents in
-  flight, the last reflection, and the tokens: `tokens 2.4M · 35% (4.1%) · $3.20` is the
+- Each card shows the project and folder, tool calls, edits, failures, the calls in flight, a
+  **Subagents** box with the session's subagents (this session's finished ones too), the last
+  reflection, what another session's last turn asked you (**? asks**), and the tokens: `tokens 2.4M · 35% (4.1%) · $3.20` is the
   session's tokens, its share of all listed sessions' use, its share of the five-hour limit, and
   its cost at API prices.
 - **Explore** opens **Where the tokens went**: all tokens split into input, cache write, cache
@@ -118,10 +122,12 @@ Open it with the **Overview** button or `/coach`. It has four sections.
   heads-up checks. **Ask Claude to apply** puts the request into your prompt box; nothing is sent
   until you send it. The check itself uses no tokens.
 
-**Subagents**: this session's running subagents and up to 15 finished ones, with type, model,
-tokens, steps and time.
+This session's **Subagents** box, inside its card, lists its running subagents and up to 15
+finished ones, with type, model, tokens, steps and time.
 
-**Last turn**: the reflection of the last finished turn.
+**Last turn**: the reflection of the last finished turn, then up to three questions Claude asked
+you in it (**? Claude asks**): the next-step box's question and the sentences of its last answer
+that end in a question mark. They are read from the answer's text, so they cost no tokens.
 
 **Session**: turns so far, heads-up checks and what they cost, and a Heads-up button.
 
