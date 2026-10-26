@@ -1343,8 +1343,14 @@ export const register: Register = (on, options) => {
         </Text>
       ))
 
+    // Each subagent sits in a box of its own, coloured by how it stands.
     const row = (a: AgentRun) => (
-      <Box flexDirection="column">
+      <Box
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : 'cyan'}
+        paddingX={1}
+      >
         <Text>
           <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : 'cyan'}>
             {a.status === 'running' ? '●' : a.status === 'done' ? '✓' : '✗'}
@@ -1530,7 +1536,7 @@ export const register: Register = (on, options) => {
               isSelf
                 ? [...running.map(row), ...finished.slice(0, 15).map(row)]
                 : (s.subagents ?? []).map(sub => (
-                    <Box flexDirection="column">
+                    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
                       <Text dimColor>
                         ↳ {sub.type}: {sub.description} · {fmtTime(at - sub.startedAt)}
                       </Text>
